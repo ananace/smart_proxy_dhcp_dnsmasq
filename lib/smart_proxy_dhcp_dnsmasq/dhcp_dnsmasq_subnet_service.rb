@@ -129,7 +129,10 @@ module Proxy::DHCP::Dnsmasq
             end
             lease_time = data.shift if data.first =~ /^\d+[mhd]|infinite|deprecated$/
 
-            next if start_addr.ipv6? # Smart-proxy currently doesn't support IPv6
+            if start_addr.ipv6? # Smart-proxy currently doesn't support IPv6
+              logger.warning "Skipping IPv6 subnet found on line #{line_nr}."
+              next
+            end
 
             logger.warning "Failed to fully parse line #{file}:#{line_nr}: '#{line}', unparsed data: #{data.inspect}" unless data.empty?
 
@@ -201,8 +204,13 @@ module Proxy::DHCP::Dnsmasq
             end
             code = data.shift.to_i
 
-            option = ::Proxy::DHCP::Standard.select { |_k, v| v[:code] == code }.first.first
-            data = data.first unless ::Proxy::DHCP::Standard[option][:is_list]
+            option = ::Proxy::DHCP::Standard.select { |_k, v| v[:code] == code }
+            if option.any?
+              option = option.keys.first
+              data = data.first unless ::Proxy::DHCP::Standard[option][:is_list]
+            else
+              option = code
+            end
 
             [subnet_ids].flatten.each do |id|
               ((configuration[id] ||= {})[:options] ||= {})[option] = data
@@ -213,6 +221,8 @@ module Proxy::DHCP::Dnsmasq
 
       subnets = []
       configuration.each do |id, data|
+        next unless data[:address] && data[:mask]
+
         logger.debug "Parsed subnet #{id} (#{data[:address]}) with configuration; #{data}"
         subnet = ::Proxy::DHCP::Subnet.new(data[:address], data[:mask], data[:options])
         yield subnet if block_given?
@@ -248,6 +258,11 @@ module Proxy::DHCP::Dnsmasq
             Proxy::DHCP::Dnsmasq.parse_tags(data)
 
             mac, ip, hostname = data[0, 3]
+
+            # Handle alternative ordering
+            if ip =~ /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/
+              mac, ip = [ip, mac]
+            end
 
             # TODO: Possible ttl on end
 

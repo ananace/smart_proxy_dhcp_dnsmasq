@@ -35,7 +35,7 @@ class DHCPDnsmasqSubnetServiceTest < Test::Unit::TestCase
 
   def test_load_fixtures
     service = Proxy::DHCP::Dnsmasq::SubnetService.new(
-      'test/fixtures/config/dnsmasq.conf', 'test/fixtures/config/dhcp', 'test/fixtures/config/dhcp.leases',
+      Dir['test/fixtures/config/dnsmasq*.conf'], 'test/fixtures/config/dhcp', 'test/fixtures/config/dhcp.leases',
       ::Proxy::MemoryStore.new, ::Proxy::MemoryStore.new,
       ::Proxy::MemoryStore.new, ::Proxy::MemoryStore.new,
       ::Proxy::MemoryStore.new
@@ -43,7 +43,7 @@ class DHCPDnsmasqSubnetServiceTest < Test::Unit::TestCase
 
     assert service.load!
 
-    subnet_id = service.subnets.keys.first
+    subnet_id = service.subnets.keys[0]
     subnet = service.subnets[subnet_id]
     assert_not_nil subnet
     assert_equal '192.168.0.0', subnet.network
@@ -53,7 +53,7 @@ class DHCPDnsmasqSubnetServiceTest < Test::Unit::TestCase
     assert_equal ['192.168.0.1'], subnet.options[:domain_name_servers]
     assert_equal '192.168.0.1-192.168.0.254', subnet.range
 
-    subnet_id = service.subnets.keys.last
+    subnet_id = service.subnets.keys[1]
     subnet = service.subnets[subnet_id]
     assert_not_nil subnet
     assert_equal '10.0.0.0', subnet.network
@@ -63,9 +63,21 @@ class DHCPDnsmasqSubnetServiceTest < Test::Unit::TestCase
     assert_equal ['10.0.0.1'], subnet.options[:domain_name_servers]
     assert_equal '10.0.0.1-10.0.0.254', subnet.range
 
+    subnet_id = service.subnets.keys[2]
+    subnet = service.subnets[subnet_id]
+    assert_not_nil subnet
+    assert_equal '192.168.2.0', subnet.network
+    assert_equal '255.255.255.0', subnet.netmask
+    assert_equal IPAddr.new('192.168.2.0/24'), subnet.ipaddr
+    assert_equal ['192.168.2.2', '192.168.2.254'], subnet.options[:range]
+    assert_equal ['192.168.2.1'], subnet.options[:domain_name_servers]
+    assert_equal ['192.168.2.1'], subnet.options[:routers]
+    assert_equal '192.168.2.1-192.168.2.254', subnet.range
+
     # 3 in dnsmasq.conf
+    # 4 in dnsmasq-2.conf
     # 1 in dhcphosts/
-    assert_equal 4, service.reservations_by_name.values.count
+    assert_equal 8, service.reservations_by_name.values.count
 
     reservation = service.find_host_by_hostname('host1')
     assert_not_nil reservation
