@@ -25,7 +25,7 @@ class DHCPDnsmasqSubnetServiceTest < Test::Unit::TestCase
     initializer.expects(:add_host)
     initializer.expects(:add_lease)
 
-    initializer.expects(:parse_config_for_subnet).returns(subnet)
+    initializer.expects(:parse_config_for_subnets).returns([subnet])
     initializer.expects(:parse_config_for_dhcp_reservations).returns([host])
     initializer.expects(:load_leases).returns([lease])
     # initializer.expects(:add_watch)
@@ -43,7 +43,8 @@ class DHCPDnsmasqSubnetServiceTest < Test::Unit::TestCase
 
     assert service.load!
 
-    subnet = service.subnets.first.last
+    subnet_id = service.subnets.keys.first
+    subnet = service.subnets[subnet_id]
     assert_not_nil subnet
     assert_equal '192.168.0.0', subnet.network
     assert_equal '255.255.255.0', subnet.netmask
@@ -51,6 +52,16 @@ class DHCPDnsmasqSubnetServiceTest < Test::Unit::TestCase
     assert_equal ['192.168.0.200', '192.168.0.223'], subnet.options[:range]
     assert_equal ['192.168.0.1'], subnet.options[:domain_name_servers]
     assert_equal '192.168.0.1-192.168.0.254', subnet.range
+
+    subnet_id = service.subnets.keys.last
+    subnet = service.subnets[subnet_id]
+    assert_not_nil subnet
+    assert_equal '10.0.0.0', subnet.network
+    assert_equal '255.255.255.0', subnet.netmask
+    assert_equal IPAddr.new('10.0.0.0/24'), subnet.ipaddr
+    assert_equal ['10.0.0.200', '10.0.0.254'], subnet.options[:range]
+    assert_equal ['10.0.0.1'], subnet.options[:domain_name_servers]
+    assert_equal '10.0.0.1-10.0.0.254', subnet.range
 
     # 3 in dnsmasq.conf
     # 1 in dhcphosts/

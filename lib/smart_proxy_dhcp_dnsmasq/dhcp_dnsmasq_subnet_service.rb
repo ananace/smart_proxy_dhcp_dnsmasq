@@ -5,6 +5,7 @@ require 'pathname'
 require 'rb-inotify'
 require 'dhcp_common/dhcp_common'
 require 'dhcp_common/subnet_service'
+require 'smart_proxy_dhcp_dnsmasq/dhcp_dnsmasq_utils'
 
 module Proxy::DHCP::Dnsmasq
   class SubnetService < ::Proxy::DHCP::SubnetService
@@ -30,7 +31,7 @@ module Proxy::DHCP::Dnsmasq
       # TODO: Refresh data if outdated
       return true if subnets.any?
 
-      add_subnet(parse_config_for_subnet)
+      parse_config_for_subnets.each { |s| add_subnet(s) }
       load_subnet_data
 
       true
@@ -78,8 +79,8 @@ module Proxy::DHCP::Dnsmasq
       Time.now - (@last_cleanup ||= Time.now) > OPTSFILE_CLEANUP_INTERVAL
     end
 
-    def parse_config_for_subnet
-      configuration = { options: {} }
+    def parse_config_for_subnets
+      configuration = { }
       files = []
       @config_paths.each do |path|
         if File.directory? path
@@ -89,15 +90,23 @@ module Proxy::DHCP::Dnsmasq
         end
       end
 
+      interfaces = Socket.getifaddrs.select { |i| Proxy::DHCP::Dnsmasq.net_iface? i }.sort { |i| i.ifindex }
+      available_interfaces = nil
+
       logger.debug "Starting parse of DHCP subnets from #{files}"
       files.each do |file|
         logger.debug "  Parsing #{file}..."
-        File.open(file, 'r').each_line do |line|
+        File.open(file, 'r').each_line.with_index do |line, line_nr|
           line.strip!
           next if line.empty? || line.start_with?('#') || !line.include?('=')
 
           option, value = line.split('=')
           case option
+          when 'interface'
+            iface = interfaces.find { |i| i.name == value }
+            (available_interfaces ||= []) << iface if iface
+          when 'no-dhcp-interface'
+            (available_interfaces ||= interfaces).delete_if { |i| i.name == value }
           when 'dhcp-leasefile'
             next if @lease_file
 
@@ -105,45 +114,111 @@ module Proxy::DHCP::Dnsmasq
           when 'dhcp-range'
             data = value.split(',')
 
-            ttl = data.pop
-            mask = data.pop
-            range_to = data.pop
-            range_from = data.pop
+            # Parse parameters
+            tags = Proxy::DHCP::Dnsmasq.parse_tags(data)
 
-            ttl = case ttl[-1]
+            initial_arg = data.shift if /^\w+$/ =~ data.first
+            start_addr = IPAddr.new(data.shift)
+            end_addr = data.shift if /^((\d{1,3}\.){3}\d{1,3}|(\a+:+)+(\a+))|(static|constructor:\w+)$/ =~ data.first
+            if start_addr.ipv4?
+              netmask = data.shift if /^(\d{1,3}\.){3}\d{1,3}$/ =~ data.first
+              broadcast = data.shift if /^(\d{1,3}\.){3}\d{1,3}$/ =~ data.first
+            else
+              mode = data.shift if /^([a-z-]+,)*([a-z-]+)$/ =~ data.first
+              prefix_len = data.shift if /^\d+$/ =~ data.first
+            end
+            lease_time = data.shift if data.first =~ /^\d+[mhd]|infinite|deprecated$/
+
+            next if start_addr.ipv6? # Smart-proxy currently doesn't support IPv6
+
+            logger.warning "Failed to fully parse line #{file}:#{line_nr}: '#{line}', unparsed data: #{data.inspect}" unless data.empty?
+
+            ipv4 = start_addr.ipv4?
+            subnet_iface = interfaces.find { |i| (ipv4 ? i.addr.ipv4? : i.addr.ipv6?) && i.name == subnet_iface } if initial_arg
+            initial_arg = nil if subnet_iface
+            subnet_iface ||= interfaces.find do |i|
+              IPAddr.new("#{i.addr.ip_address}/#{i.netmask.ip_address}").include? start_addr
+            end
+
+            # Make sure to always have a name for all subnets
+            subnet_id = initial_arg
+            subnet_id ||= subnet_iface.name if subnet_iface
+            subnet_id ||= tags.set
+            subnet_id ||= 'default'
+
+            mask = netmask
+            mask ||= subnet_iface.netmask.ip_address if subnet_iface
+            if !mask && ipv4
+              mask ||= '255.0.0.0' if IPAddr.new('10.0.0.0/8').include? start_addr
+              mask ||= '255.255.0.0' if IPAddr.new('172.16.0.0/12').include? start_addr
+              mask ||= '255.255.255.0'
+            elsif !mask
+              mask ||= prefix_len
+            end
+
+            ttl = case lease_time[-1]
+                  when 'd'
+                    lease_time[0..-2].to_i * 24 * 60 * 60
                   when 'h'
-                    ttl[0..-2].to_i * 60 * 60
+                    lease_time[0..-2].to_i * 60 * 60
                   when 'm'
-                    ttl[0..-2].to_i * 60
+                    lease_time[0..-2].to_i * 60
                   else
-                    ttl.to_i
-                  end
+                    lease_time.to_i
+                  end if lease_time
+            ttl ||= 1 * 60 * 60 # Default lease time is one hour
 
-            configuration.merge! \
-              address: IPAddr.new("#{range_from}/#{mask}").to_s,
+            subnet_data = (configuration[subnet_id] ||= {})
+            subnet_data.merge! \
+              interface: subnet_iface&.name,
+              address: IPAddr.new("#{start_addr}/#{mask}").to_s,
+              broadcast: broadcast,
               mask: mask,
+              mode: mode,
+              range: [start_addr.to_s, end_addr].compact,
               ttl: ttl
 
-            configuration[:options][:range] = [range_from, range_to]
+            (subnet_data[:options] ||= {}).merge! \
+              range: subnet_data[:range]
+
+            # TODO: Handle this in a better manner
+            @ttl = subnet_data[:ttl]
           when 'dhcp-option'
             data = value.split(',')
+            tags = Proxy::DHCP::Dnsmasq.parse_tags(data)
 
-            data.shift until data.empty? || /\A\d+\z/ =~ data.first
+            subnet_ids = tags.tags.empty? ? nil : tags.tags
+            subnet_ids ||= data.first if configuration.keys.include? data.first
+            subnet_ids ||= data.first if interfaces.find { |i| i.name == data.first }
+            subnet_ids ||= configuration.keys
+
+            data.shift until data.empty? || /^\d+|option6?:\w+$/ =~ data.first
             next if data.empty?
 
+            unless data.first =~ /^\d+$/
+              logger.warning "Found non-numeric DHCP option on line #{file}:#{line_nr}: '#{line}', skipping."
+              next
+            end
             code = data.shift.to_i
-            option = ::Proxy::DHCP::Standard.select { |_k, v| v[:code] == code }.first.first
 
+            option = ::Proxy::DHCP::Standard.select { |_k, v| v[:code] == code }.first.first
             data = data.first unless ::Proxy::DHCP::Standard[option][:is_list]
-            configuration[:options][option] = data
+
+            [subnet_ids].flatten.each do |id|
+              ((configuration[id] ||= {})[:options] ||= {})[option] = data
+            end
           end
         end
       end
 
-      # TODO: Multiple subnets
-      logger.debug "Adding subnet with configuration; #{configuration}"
-      @ttl = configuration[:ttl]
-      ::Proxy::DHCP::Subnet.new(configuration[:address], configuration[:mask], configuration[:options])
+      subnets = []
+      configuration.each do |id, data|
+        logger.debug "Parsed subnet #{id} (#{data[:address]}) with configuration; #{data}"
+        subnet = ::Proxy::DHCP::Subnet.new(data[:address], data[:mask], data[:options])
+        yield subnet if block_given?
+        subnets << subnet
+      end
+      subnets
     end
 
     # Expects subnet_service to have subnet data
@@ -170,7 +245,7 @@ module Proxy::DHCP::Dnsmasq
           case option
           when 'dhcp-host'
             data = value.split(',')
-            data.shift while data.first.start_with? 'set:'
+            Proxy::DHCP::Dnsmasq.parse_tags(data)
 
             mac, ip, hostname = data[0, 3]
 
@@ -186,17 +261,16 @@ module Proxy::DHCP::Dnsmasq
             )
           when 'dhcp-boot'
             data = value.split(',')
-            if data.first.start_with? 'tag:'
-              mac = data.first[4..-1]
-              data.shift
+            tags = Proxy::DHCP::Dnsmasq.parse_tags(data)
+            next if tags.tags.empty?
 
-              next unless to_ret.key? mac
+            mac = tags.tags.find { |t| /^(\w{2}:){5}\w{2}$/ =~ t }
+            next if mac.nil?
 
-              file, server = data
+            file, server = data
 
-              to_ret[mac].options[:nextServer] = server
-              to_ret[mac].options[:filename] = file
-            end
+            to_ret[mac].options[:nextServer] = server
+            to_ret[mac].options[:filename] = file
           end
         end
       end
@@ -209,10 +283,8 @@ module Proxy::DHCP::Dnsmasq
           data = line.strip.split(',')
           next if data.empty? || !data.first.start_with?('tag:')
 
-          tag = data.first[4..-1]
-          data.shift
-
-          dhcpoptions[tag] = data.last
+          tags = Proxy::DHCP::Dnsmasq.parse_tags(data)
+          dhcpoptions[tags.tag] = data.last
         end
       end
 
@@ -227,10 +299,8 @@ module Proxy::DHCP::Dnsmasq
           data.shift
 
           options = { deletable: true }
-          while data.first.start_with? 'set:'
-            tag = data.first[4..-1]
-            data.shift
-
+          tags = Proxy::DHCP::Dnsmasq.parse_tags(data)
+          tags.sets.each do |tag|
             value = dhcpoptions[tag]
             next if value.nil?
 
