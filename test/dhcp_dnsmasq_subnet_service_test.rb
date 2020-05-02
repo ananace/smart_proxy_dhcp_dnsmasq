@@ -51,6 +51,7 @@ class DHCPDnsmasqSubnetServiceTest < Test::Unit::TestCase
     assert_equal IPAddr.new('192.168.0.0/24'), subnet.ipaddr
     assert_equal ['192.168.0.200', '192.168.0.223'], subnet.options[:range]
     assert_equal ['192.168.0.1'], subnet.options[:domain_name_servers]
+    assert_equal 'example.com', subnet.options[:domain_name]
     assert_equal '192.168.0.1-192.168.0.254', subnet.range
 
     subnet_id = service.subnets.keys[1]
@@ -61,6 +62,7 @@ class DHCPDnsmasqSubnetServiceTest < Test::Unit::TestCase
     assert_equal IPAddr.new('10.0.0.0/24'), subnet.ipaddr
     assert_equal ['10.0.0.200', '10.0.0.254'], subnet.options[:range]
     assert_equal ['10.0.0.1'], subnet.options[:domain_name_servers]
+    assert_equal 'example.com', subnet.options[:domain_name]
     assert_equal '10.0.0.1-10.0.0.254', subnet.range
 
     subnet_id = service.subnets.keys[2]
@@ -72,6 +74,7 @@ class DHCPDnsmasqSubnetServiceTest < Test::Unit::TestCase
     assert_equal ['192.168.2.2', '192.168.2.254'], subnet.options[:range]
     assert_equal ['192.168.2.1'], subnet.options[:domain_name_servers]
     assert_equal ['192.168.2.1'], subnet.options[:routers]
+    assert_equal 'localnet', subnet.options[:domain_name]
     assert_equal '192.168.2.1-192.168.2.254', subnet.range
 
     # 3 in dnsmasq.conf

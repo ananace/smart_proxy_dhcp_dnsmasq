@@ -92,6 +92,7 @@ module Proxy::DHCP::Dnsmasq
 
       interfaces = Socket.getifaddrs.select { |i| Proxy::DHCP::Dnsmasq.net_iface? i }.sort { |i| i.ifindex }
       available_interfaces = nil
+      domain = nil
 
       logger.debug "Starting parse of DHCP subnets from #{files}"
       files.each do |file|
@@ -101,12 +102,18 @@ module Proxy::DHCP::Dnsmasq
           next if line.empty? || line.start_with?('#') || !line.include?('=')
 
           option, value = line.split('=')
+
+          option.strip!
+          value.strip!
+
           case option
           when 'interface'
             iface = interfaces.find { |i| i.name == value }
             (available_interfaces ||= []) << iface if iface
           when 'no-dhcp-interface'
             (available_interfaces ||= interfaces).delete_if { |i| i.name == value }
+          when 'domain'
+            domain = value
           when 'dhcp-leasefile'
             next if @lease_file
 
@@ -183,6 +190,8 @@ module Proxy::DHCP::Dnsmasq
 
             (subnet_data[:options] ||= {}).merge! \
               range: subnet_data[:range]
+
+            subnet_data[:options][:domain_name] = domain if domain
 
             # TODO: Handle this in a better manner
             @ttl = subnet_data[:ttl]
